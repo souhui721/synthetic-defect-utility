@@ -1,4 +1,3 @@
-
 """
 MVP 技术验证：合成缺陷样本的"边际效用"到底测不测得出？
 
@@ -103,9 +102,13 @@ def cutpaste(img, rng, size):
 
 
 def cutpaste_salient(img, rng, size):
-    """从高纹理区（物体）取块、贴到低纹理区（背景）：制造真正可见的异物缺陷。
+    """从物体区取块、贴到背景区：制造真正可见的异物缺陷。
 
-    动机：均匀背景上原地取块再贴回去，视觉上什么也没发生——那批"合成缺陷"是空操作。
+    相对旧实现修了三处：
+    1) 用「与背景色的距离」判断背景，而不是纯梯度——胶囊本身也是低梯度的，
+       单看梯度会把黑色胶囊错当成背景；
+    2) 用积分图按「窗口左上角」对齐打分，不再把盒式模糊的窗口中心当左上角用；
+    3) 取块/贴块从 top-K 候选里随机选，不再由 argmax/argmin 唯一确定。
     """
     import cv2
 
@@ -122,28 +125,64 @@ def cutpaste_salient(img, rng, size):
             w, h = int(rng.uniform(0.18, 0.3) * size), int(rng.uniform(0.04, 0.07) * size)
     w, h = max(6, min(w, size - 12)), max(6, min(h, size - 12))
 
-    k = max(w, h)
-    energy = cv2.blur(grad, (k, k))
-    m = k // 2
-    inner = energy[m:size - m, m:size - m]
-    sy, sx = np.unravel_index(np.argmax(inner), inner.shape)   # 最像物体
-    ty, tx = np.unravel_index(np.argmin(inner), inner.shape)   # 最像背景
-    sy, sx, ty, tx = sy + m, sx + m, ty + m, tx + m
+    # 背景参考色：图像四条边的中位数（胶囊类图像背景占多数，中位数不受贴边的胶囊影响）
+    b = max(2, int(0.03 * size))
+    edges = np.concatenate([
+        a[:b].reshape(-1, 3), a[-b:].reshape(-1, 3),
+        a[:, :b].reshape(-1, 3), a[:, -b:].reshape(-1, 3),
+    ]).astype(np.float32)
+    bg_color = np.median(edges, axis=0)
+    dist = np.linalg.norm(a.astype(np.float32) - bg_color[None, None, :], axis=2)
+
+    # 按 h×w 窗口（左上角对齐）算平均分数
+    def mean_box(arr):
+        I = cv2.integral(arr.astype(np.float64))
+        S = I[h:, w:] - I[:-h, w:] - I[h:, :-w] + I[:-h, :-w]
+        return (S / float(h * w)).astype(np.float32)
+
+    md = mean_box(dist)     # 窗口内平均「离背景色多远」
+    mg = mean_box(grad)     # 窗口内平均梯度
+
+    # 取块：离背景色最远（物体），从 top-K 里随机
+    k_obj = min(30, md.size - 1)
+    top_obj = np.argpartition(md.ravel(), -k_obj)[-k_obj:]
+    sy, sx = np.unravel_index(int(top_obj[rng.randrange(k_obj)]), md.shape)
+
+    # 贴块：最接近背景色且最平坦。排除贴边位置，在“高分带”里均匀随机，
+    # 否则同一张图的合成样本会全挤在分数最高的那一小条背景上。
+    bs = -md - 0.5 * mg
+    pad = 8
+    valid = np.zeros(bs.shape, dtype=bool)
+    if size - h + 1 - 2 * pad > 0 and size - w + 1 - 2 * pad > 0:
+        valid[pad:size - h + 1 - pad, pad:size - w + 1 - pad] = True
+    else:
+        valid[:] = True
+    thr = float(bs.max()) - 0.20 * (float(bs.max()) - float(bs.min()))
+    cand = np.flatnonzero(valid.ravel() & (bs.ravel() >= thr))
+    if cand.size == 0:
+        cand = np.array([int(np.argmax(bs))])
+    order = [int(j) for j in cand]
+    rng.shuffle(order)
+    py, px = np.unravel_index(order[0], bs.shape)
+    for j in order:
+        ty, tx = np.unravel_index(j, bs.shape)
+        if abs(ty - sy) > h // 2 or abs(tx - sx) > w // 2:
+            py, px = ty, tx
+            break
 
     patch = a[sy:sy + h, sx:sx + w].copy()
     if patch.size == 0:
         patch = a[:h, :w].copy()
     patch = np.asarray(Image.fromarray(patch).rotate(rng.uniform(-20, 20)), dtype=np.uint8)
     ph, pw = patch.shape[:2]
+    if ph > h or pw > w:      # 旋转后外框变大，缩回原尺寸
+        patch = cv2.resize(patch, (w, h), interpolation=cv2.INTER_AREA)
+        ph, pw = h, w
     gain = rng.uniform(0.85, 1.18)
     patch = np.clip(patch.astype(np.float32) * gain + rng.uniform(-12, 12), 0, 255).astype(np.uint8)
 
-    # 贴到背景处，且尽量不与取样区重叠
-    for _ in range(8):
-        px = int(np.clip(tx + rng.randint(-k // 2, k // 2), 0, size - pw))
-        py = int(np.clip(ty + rng.randint(-k // 2, k // 2), 0, size - ph))
-        if abs(px - sx) > pw // 2 or abs(py - sy) > ph // 2:
-            break
+    py = int(np.clip(py, 0, size - ph))
+    px = int(np.clip(px, 0, size - pw))
     a[py:py + ph, px:px + pw] = patch
     mask = np.zeros((size, size), dtype=np.float32)
     mask[py:py + ph, px:px + pw] = 1.0
@@ -341,7 +380,6 @@ def main():
 
     payload = {"args": vars(args), "summary": summary, "rows": results,
                "elapsed_s": time.time() - t0}
-    os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "results.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     np.savez_compressed(os.path.join(args.out, "feats.npz"),

@@ -19,7 +19,6 @@ import sys
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-
 import numpy as np
 import matplotlib
 
@@ -27,28 +26,31 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "SimSun"]
 plt.rcParams["axes.unicode_minus"] = False
 
+HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.join(HERE, "results")   # 读 json
 FIGS = os.path.join(HERE, "figures")   # 写 png
 os.makedirs(FIGS, exist_ok=True)
 
-# 三种样本来源的图内标注（去术语版）
+# 五种样本来源的图内标注（去术语版）
 SRC_CN = {
     "cutpaste": "原位剪贴\n（CutPaste）",
     "salient": "跨区剪贴\n（CutPaste-S）",
     "augment": "真实缺陷简单变换\n（翻转／旋转／缩放／调色）",
+    "repeat": "直接重复\n（同一张复制）",
+    "noise": "随机噪声贴块\n（无意义合成）",
 }
-# 第三幅画的是真实缺陷变换，不是合成缺陷，横轴标注必须分开
+# 后四种画的都不是合成缺陷，横轴标注必须分开
 XLAB = {
     "cutpaste": "合成缺陷数量（张）",
     "salient": "合成缺陷数量（张）",
     "augment": "变换样本数量（张）",
+    "repeat": "重复样本数量（张）",
+    "noise": "噪声样本数量（张）",
 }
-ORDER = ["cutpaste", "salient", "augment"]
+ORDER = ["cutpaste", "salient", "augment", "repeat", "noise"]
 
 
 def load(name):
@@ -130,23 +132,25 @@ def draw_roadmap():
 
 # ============================================================ 图 3 热力图
 def draw_heatmap():
+    """主实验三种来源：原位剪贴、跨区剪贴、真图简单变换。"""
     d = load("results_controls.json")
     sm = d["summary"]
     ks = d["args"]["ks"]
     ns = [n for n in d["args"]["ns"] if n != 0]
+    show = ["cutpaste", "salient", "augment"]
 
     fig, axes = plt.subplots(1, 3, figsize=(6.2, 2.26), dpi=300,
                              constrained_layout=True)
     allv = [abs(sm[f"{g}|{k}|{n}"]["delta"]) for g in ORDER for k in ks for n in ns]
     vmax = max(0.03, max(allv))
 
-    for ax, g in zip(axes, ORDER):
+    for ax, g in zip(axes, show):
         delta = np.array([[sm[f"{g}|{k}|{n}"]["delta"] for n in ns] for k in ks])
         im = ax.imshow(delta, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto")
         ax.set_xticks(range(len(ns)), [str(n) for n in ns], fontsize=8)
         ax.set_yticks(range(len(ks)), [str(k) for k in ks], fontsize=8)
         ax.set_xlabel(XLAB[g], fontsize=8, labelpad=2)
-        if g == ORDER[0]:
+        if g == show[0]:
             ax.set_ylabel("真实缺陷数量（张）", fontsize=8, labelpad=2)
         ax.set_title(SRC_CN[g], fontsize=8.2 if g == "augment" else 8.8, pad=4)
         for i, k in enumerate(ks):
@@ -164,6 +168,44 @@ def draw_heatmap():
     fig.savefig(out, dpi=220, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
     print("saved fig_delta_heatmap.png")
+
+
+def draw_heatmap_ctrl():
+    """两种「无意义」对照：直接重复与随机噪声贴块。"""
+    d = load("results_controls.json")
+    sm = d["summary"]
+    ks = d["args"]["ks"]
+    ns = [n for n in d["args"]["ns"] if n != 0]
+    show = ["repeat", "noise"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(4.5, 2.10), dpi=300,
+                             constrained_layout=True)
+    allv = [abs(sm[f"{g}|{k}|{n}"]["delta"]) for g in ORDER for k in ks for n in ns]
+    vmax = max(0.03, max(allv))
+
+    for ax, g in zip(axes, show):
+        delta = np.array([[sm[f"{g}|{k}|{n}"]["delta"] for n in ns] for k in ks])
+        im = ax.imshow(delta, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto")
+        ax.set_xticks(range(len(ns)), [str(n) for n in ns], fontsize=8)
+        ax.set_yticks(range(len(ks)), [str(k) for k in ks], fontsize=8)
+        ax.set_xlabel(XLAB[g], fontsize=8, labelpad=2)
+        ax.set_ylabel("真实缺陷数量（张）", fontsize=8, labelpad=2)
+        ax.set_title(SRC_CN[g], fontsize=8.6, pad=4)
+        for i, k in enumerate(ks):
+            for j, n in enumerate(ns):
+                v = delta[i, j]
+                q = sm[f"{g}|{k}|{n}"]["q"]
+                s = f"{v:+.3f}" + ("*" if q < 0.05 else "")
+                ax.text(j, i, s, ha="center", va="center", fontsize=7.2,
+                        color="white" if abs(v) > vmax * 0.55 else "#1a1a1a")
+
+    cb = fig.colorbar(im, ax=axes, fraction=0.026, pad=0.020)
+    cb.set_label("变化量（红＝变好）", fontsize=7.4)
+    cb.ax.tick_params(labelsize=6.8)
+    out = os.path.join(FIGS, "fig_delta_controls.png")
+    fig.savefig(out, dpi=220, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+    print("saved fig_delta_controls.png")
 
 
 # ============================================================ 图 4 方法对比
@@ -248,7 +290,7 @@ def draw_framework():
         (0.10, 1.85, "① 造什么", "合成方法与对照",
          ["原位剪贴 · 跨区剪贴", "纹理叠加 · AI 生成", "统一输出：图像＋位置"], BLUE),
         (1.92, 3.67, "② 怎么评", "控制变量 + 统计校正",
-         ["三组对照：变换／重复／噪声", "48 组条件 × 10 次重复", "校正之后才谈“有提升”"], GREEN),
+         ["三组对照：变换／重复／噪声", "80 组条件 × 10 次重复", "校正之后才谈“有提升”"], GREEN),
         (3.74, 5.50, "③ 怎么用", "查询表与判定规则",
          ["条件—效用查询表", "反作用判定规则", "全部在训练之前算出"], ORANGE),
     ]
@@ -291,10 +333,8 @@ def draw_record():
                "exp_patchcore.py", "plot_results.py", "plot_paper_figs.py"]
     results = ["results.json", "results_controls.json",
                "results_strongsup.json", "stats.txt"]
-    def _size(n):
-        p = os.path.join(HERE if n.endswith(".py") else BASE, n)
-        return os.path.getsize(p) / 1024.0
-    files = [(n, _size(n)) for n in scripts + results]
+    files = [(n, os.path.getsize(os.path.join(BASE, n)) / 1024.0)
+             for n in scripts + results]
 
     runs = [("results.json", "预实验"), ("results_controls.json", "对照实验"),
             ("results_strongsup.json", "强基线")]
@@ -306,10 +346,10 @@ def draw_record():
         n_fit += n
         t_all += t
         rows.append((tag, "%d 次 / %d 秒" % (n, round(t))))
-    rows = [("条件组合", "48 组"), ("对照组", "3 组"),
+    rows = [("条件组合", "%d 组" % len(load("results_controls.json")["summary"])),
+            ("对照来源", "3 种（变换／重复／噪声）"),
             ("每组重复", "10 次（5 折 × 2 种子）")] + rows + \
            [("合计", "%d 次 / %d 秒" % (n_fit, round(t_all)))]
-    n_cell = len(load("results_controls.json")["summary"])
 
     fig, ax = plt.subplots(figsize=(5.0, 2.02), dpi=300)
     ax.set_xlim(0, 1)
@@ -366,12 +406,138 @@ def draw_record():
           % (len(files), len(rows), n_fit, t_all))
 
 
+# ============================================================ 图 4 判定逻辑
+def draw_logic():
+    """对照组为什么必要：四条来源 → 同一套评测 → 三种结论。"""
+    fig, ax = plt.subplots(figsize=(5.0, 2.02), dpi=320)
+    ax.set_xlim(0, 5.6)
+    ax.set_ylim(0, 2.26)
+    ax.axis("off")
+
+    BLUE = ("#E8F0F8", "#2F6FA8")
+    GREEN = ("#E9F5EC", "#3E8E5A")
+    GREY = ("#F2F4F7", "#8A97A6")
+    PURPLE = ("#EFEAF6", "#7A5FA8")
+
+    # 基线
+    rbox(ax, 1.86, 1.94, 3.74, 2.22, *BLUE)
+    ax.text(2.80, 2.08, "k 张真实缺陷（基线）", fontsize=7.6, color="#16324F",
+            ha="center", va="center", fontweight="bold")
+
+    # 四条来源
+    cols = [
+        (0.08, 1.34, "＋N 张合成缺陷", "原位／跨区剪贴", BLUE, 1),
+        (1.50, 2.76, "＋N 张简单变换", "翻转·旋转·缩放", GREEN, 1),
+        (2.92, 4.18, "＋N 张直接重复", "同一张复制", GREY, 0),
+        (4.34, 5.60, "＋N 张随机噪声", "贴纯噪声块", GREY, 0),
+    ]
+    for x0, x1, t1, t2, (fc, ec), strong in cols:
+        rbox(ax, x0, 1.26, x1, 1.66, fc, ec, lw=1.1 if strong else 0.8)
+        cx = (x0 + x1) / 2
+        ax.text(cx, 1.535, t1, fontsize=7.0, color=ec if strong else "#4A6076",
+                ha="center", va="center", fontweight="bold" if strong else "normal")
+        ax.text(cx, 1.375, t2, fontsize=6.0, color="#5A6B7C", ha="center", va="center")
+
+    # 基线 → 四条来源
+    ax.plot([2.80, 2.80], [1.94, 1.80], color="#5B6B7C", lw=0.9)
+    ax.plot([0.71, 4.97], [1.80, 1.80], color="#5B6B7C", lw=0.9)
+    for x in (0.71, 2.13, 3.55, 4.97):
+        arrow(ax, (x, 1.80), (x, 1.66))
+
+    # 四条来源 → 判定
+    for x in (0.71, 2.13, 3.55, 4.97):
+        ax.plot([x, x], [1.26, 1.12], color="#5B6B7C", lw=0.9)
+    ax.plot([0.71, 4.97], [1.12, 1.12], color="#5B6B7C", lw=0.9)
+    arrow(ax, (2.80, 1.12), (2.80, 1.00))
+
+    # 判定
+    rbox(ax, 0.08, 0.26, 5.52, 1.00, *PURPLE, lw=1.1)
+    ax.text(0.22, 0.865, "同一个数据划分上比 Δ 得分", fontsize=6.8,
+            color="#4B3A6B", ha="left", va="center", fontweight="bold")
+    rows = [
+        ("Δ合成明显高于 Δ变换", "提升来自合成内容本身", "#2F6FA8"),
+        ("两者差不多", "提升只是样本数量变多", "#3E8E5A"),
+        ("两者都不显著", "现有数据还分不出（不等于无效）", "#8A97A6"),
+    ]
+    for i, (a, b, c) in enumerate(rows):
+        y = 0.660 - i * 0.155
+        ax.text(0.22, y, "▪", fontsize=6.5, color=c, va="center")
+        ax.text(0.40, y, a, fontsize=6.6, color="#2A2A2A", va="center")
+        ax.text(2.42, y, "→", fontsize=6.6, color="#8A97A6", va="center")
+        ax.text(2.66, y, b, fontsize=6.6, color=c, va="center", fontweight="bold")
+
+    fig.subplots_adjust(left=0.004, right=0.996, top=0.995, bottom=0.005)
+    out = os.path.join(FIGS, "fig_logic.png")
+    fig.savefig(out, dpi=300, bbox_inches="tight", pad_inches=0.04)
+    plt.close(fig)
+    print("saved fig_logic.png")
+
+
+# ============================================================ 图 8 进度时间轴
+def draw_gantt():
+    """12 个月、五个阶段、两个检查点。"""
+    fig, ax = plt.subplots(figsize=(5.0, 1.62), dpi=320)
+    ax.set_xlim(0, 5.6)
+    ax.set_ylim(0, 1.72)
+    ax.axis("off")
+
+    X0, X1 = 1.32, 5.50
+    M = (X1 - X0) / 12.0          # 每月宽度
+    def mx(m):
+        return X0 + m * M
+
+    phases = [
+        ("阶段一", "文献与固化", 0, 2, "#2F6FA8", "#E8F0F8"),
+        ("阶段二", "强基线对齐", 2, 2, "#2F6FA8", "#E8F0F8"),
+        ("阶段三", "主体实验", 4, 3, "#3E8E5A", "#E9F5EC"),
+        ("阶段四", "分析与规则", 7, 2, "#C08434", "#FBF0E4"),
+        ("阶段五", "验证与结题", 9, 3, "#C08434", "#FBF0E4"),
+    ]
+    for i, (no, name, s, w, ec, fc) in enumerate(phases):
+        y = 1.44 - i * 0.235
+        ax.text(0.06, y, no, fontsize=6.8, color=ec, va="center", fontweight="bold")
+        ax.text(0.58, y, name, fontsize=6.0, color="#4A6076", va="center")
+        ax.add_patch(FancyBboxPatch(
+            (mx(s), y - 0.072), w * M, 0.144,
+            boxstyle="round,pad=0.004,rounding_size=0.03",
+            linewidth=0.8, edgecolor=ec, facecolor=fc))
+
+    # 时间轴
+    AY = 0.30
+    ax.plot([X0, X1], [AY, AY], color="#5B6B7C", lw=0.9)
+    for m, lab in [(0, "2026.12"), (3, "2027.03"), (6, "2027.06"),
+                   (9, "2027.09"), (12, "2027.11")]:
+        ax.plot([mx(m), mx(m)], [AY - 0.03, AY + 0.03], color="#5B6B7C", lw=0.8)
+        ax.text(mx(m), AY - 0.10, lab, fontsize=5.8, color="#5A6B7C",
+                ha="center", va="center")
+
+    # 中期检查（外部硬节点）
+    xm = mx(4.5)
+    ax.plot([xm, xm], [0.24, 1.58], color="#C0392B", lw=0.9, linestyle=(0, (3, 2)))
+    ax.text(xm + 0.05, 1.62, "4 月中旬 学校中期检查", fontsize=6.0,
+            color="#C0392B", ha="left", va="center")
+
+    # 阶段起点刻度
+    for m in (2, 4, 7, 9):
+        ax.plot([mx(m), mx(m)], [0.24, 1.52], color="#C9D6E4", lw=0.6,
+                linestyle=(0, (2, 2)))
+
+    fig.subplots_adjust(left=0.004, right=0.996, top=0.995, bottom=0.005)
+    out = os.path.join(FIGS, "fig_gantt.png")
+    fig.savefig(out, dpi=300, bbox_inches="tight", pad_inches=0.04)
+    plt.close(fig)
+    print("saved fig_gantt.png")
+
+
 if __name__ == "__main__":
     draw_framework()
     draw_roadmap()
     draw_heatmap()
+    draw_heatmap_ctrl()
     draw_compare()
     draw_record()
+    draw_logic()
+    draw_gantt()
 
 
 

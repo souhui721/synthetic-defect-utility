@@ -1,4 +1,3 @@
-
 """对照组实验：回应评审点名的三件事
 
 1. 「真图增强」对照 —— 排除「只是正样本变多了」这个混杂因素。
@@ -24,8 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from exp_mvp import (build_backbone, cutpaste, cutpaste_salient, extract,  # noqa: E402
                      load_mask, load_rgb, masks_to_tokens, scan_dataset)
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 def augment(img, mask, rng):
     """几何 + 颜色增强，掩码同步变换。返回 (aug_img, aug_mask)。"""
@@ -49,6 +48,28 @@ def augment(img, mask, rng):
     a = a * rng.uniform(0.9, 1.1) + rng.uniform(-8, 8)
     a = np.clip(a, 0, 255).astype(np.uint8)
     return a, (np.asarray(mk) > 127).astype(np.float32)
+
+
+def noise_block(img, rng, size):
+    """在随机位置贴一块均匀噪声：代表「毫无意义的合成」，作为效果下限参照。"""
+    a = img.copy()
+    if rng.random() < 0.6:
+        w = int(rng.uniform(0.07, 0.13) * size)
+        h = int(rng.uniform(0.07, 0.13) * size)
+    else:
+        if rng.random() < 0.5:
+            w, h = int(rng.uniform(0.04, 0.07) * size), int(rng.uniform(0.18, 0.3) * size)
+        else:
+            w, h = int(rng.uniform(0.18, 0.3) * size), int(rng.uniform(0.04, 0.07) * size)
+    w, h = max(6, min(w, size - 12)), max(6, min(h, size - 12))
+    x0 = rng.randint(0, max(0, size - w - 1))
+    y0 = rng.randint(0, max(0, size - h - 1))
+    ns = np.random.RandomState(rng.randrange(10 ** 6))
+    block = ns.randint(0, 256, size=(h, w, 3), dtype=np.uint8)
+    a[y0:y0 + h, x0:x0 + w] = block
+    m = np.zeros((size, size), dtype=np.float32)
+    m[y0:y0 + h, x0:x0 + w] = 1.0
+    return a, m
 
 
 def bh_correct(pvals):
@@ -81,6 +102,9 @@ def main():
     ap.add_argument("--aug-per-defect", type=int, default=8)
     args = ap.parse_args()
 
+    # 五种来源：两种剪贴式合成、真图简单变换、直接重复、随机噪声
+    SOURCES = ("cutpaste", "salient", "augment", "repeat", "noise")
+
     os.makedirs(args.out, exist_ok=True)
     device = "cuda"
     t0 = time.time()
@@ -107,11 +131,11 @@ def main():
                for _, _, m in defects]
     d_mask_tok = masks_to_tokens(d_masks, args.grid, args.size)
 
-    # ---- 合成池（两种）
+    # ---- 合成池（三种合成来源：两种剪贴 + 随机噪声）
     src = train_good[:]
     rng.shuffle(src)
     pools = {}
-    for gen, fn in (("cutpaste", cutpaste), ("salient", cutpaste_salient)):
+    for gen, fn in (("cutpaste", cutpaste), ("salient", cutpaste_salient), ("noise", noise_block)):
         imgs, masks = [], []
         for i in range(args.n_synth):
             a, m = fn(load_rgb(src[i % len(src)], args.size), rng, args.size)
@@ -157,7 +181,7 @@ def main():
                 kidx = r.choice(pool_idx, size=min(k, len(pool_idx)), replace=False)
                 covered = set(d_types[i] for i in kidx)
                 covered_mask = np.array([t in covered for t in ev_types])
-                for source in ("cutpaste", "salient", "augment"):
+                for source in SOURCES:
                     for N in args.ns:
                         if N == 0 and source != "cutpaste":
                             continue
@@ -170,6 +194,11 @@ def main():
                             sel = r.choice(cand, size=min(N, len(cand)), replace=False)
                             add_tok = aug_tok[fold][sel]
                             add_mask = aug_mask[fold][sel]
+                        elif source == "repeat":
+                            # 直接重复：把 k 张真缺陷有放回地再抽 N 张，信息量不增加
+                            sel = r.choice(kidx, size=N, replace=True)
+                            add_tok = d_tok[sel]
+                            add_mask = d_mask_tok[sel]
                         else:
                             st, sm = pools[source]
                             sel = r.choice(len(st), size=min(N, len(st)), replace=False)
@@ -207,7 +236,7 @@ def main():
 
     # ---- 汇总 + BH 校正
     summary, pvals = {}, []
-    for source in ("cutpaste", "salient", "augment"):
+    for source in SOURCES:
         for k in args.ks:
             base = {(r["fold"], r["seed"]): r["auc"] for r in rows
                     if r["k"] == k and r["N"] == 0}
@@ -246,7 +275,7 @@ def main():
         base_unseen = float(np.nanmean([r["auc_unseen"] for r in base_rows])) if base_rows else float("nan")
         print(f"\n-- k={k}  基线 AUROC={base_auc:.3f}（seen {base_seen:.3f} / unseen {base_unseen:.3f}）")
         print(f"{'source':12s}" + "".join(f"{n:>16d}" for n in args.ns if n > 0))
-        for source in ("cutpaste", "salient", "augment"):
+        for source in SOURCES:
             cells = []
             for N in args.ns:
                 if N == 0:
@@ -257,7 +286,7 @@ def main():
 
     print("\n=== 绝对 AUROC：overall / seen / unseen ===")
     print(f"{'source':12s}{'k':>3s}{'N':>5s}{'overall':>9s}{'seen':>8s}{'unseen':>8s}")
-    for source in ("cutpaste", "salient", "augment"):
+    for source in SOURCES:
         for k in args.ks:
             for N in args.ns:
                 if N == 0:
@@ -275,7 +304,6 @@ def main():
                         continue
                     print(f"{source:12s}{k:>3d}{N:>5d}{v['mean']:9.3f}{v['seen']:8.3f}{v['unseen']:8.3f}")
 
-    os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "results_controls.json"), "w", encoding="utf-8") as f:
         json.dump({"args": vars(args), "summary": summary, "rows": rows,
                    "elapsed_s": time.time() - t0}, f, ensure_ascii=False, indent=2)
